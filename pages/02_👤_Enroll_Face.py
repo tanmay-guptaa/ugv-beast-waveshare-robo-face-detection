@@ -159,7 +159,7 @@ with wizard_col:
     st.markdown('<div class="wizard-step-header">1️⃣ Enter Person Profile</div>', unsafe_allow_html=True)
     p_col1, p_col2 = st.columns(2)
     with p_col1:
-        p_name = st.text_input("Full Name *", placeholder="e.g. Tanmay or Vikas", key="w_name")
+        p_name = st.text_input("Full Name *", placeholder="Enter full name...", key="w_name")
     with p_col2:
         p_role = st.text_input("Role", placeholder="e.g. Software Developer / Admin", key="w_role")
 
