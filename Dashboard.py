@@ -365,10 +365,9 @@ with col_c:
         <div style="font-size:1.1rem; font-weight:700; color:#f1f5f9; margin:6px 0 10px 0;">Streamlit Dashboard</div>
         <ul style="margin:0; padding-left:16px; font-size:0.8rem; color:#94a3b8; line-height:1.8;">
             <li>Live Video Feed (st.image)</li>
-            <li>"Vikas Detected" Metric Cards</li>
-            <li>Captured Images Gallery Grid</li>
-            <li>Interactive Control Sidebar</li>
-            <li>Face Enrollment Panel</li>
+            <li>Real-Time Identity Recognition</li>
+            <li>Multi-Angle Face Enrollment Wizard</li>
+            <li>Telemetry & Hardware Sensors</li>
         </ul>
     </div>
     """, unsafe_allow_html=True)
@@ -386,10 +385,6 @@ with nav_col1:
             <tr style="border-bottom:1px solid #334155;">
                 <td style="padding:6px 0; color:#a78bfa;">📷 Live Detection</td>
                 <td style="color:#94a3b8;">Real-time camera + face recognition</td>
-            </tr>
-            <tr style="border-bottom:1px solid #334155;">
-                <td style="padding:6px 0; color:#a78bfa;">🖼 Gallery</td>
-                <td style="color:#94a3b8;">Browse all captured face snapshots</td>
             </tr>
             <tr style="border-bottom:1px solid #334155;">
                 <td style="padding:6px 0; color:#a78bfa;">👤 Enroll Face</td>

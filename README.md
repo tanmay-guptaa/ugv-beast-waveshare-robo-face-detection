@@ -10,8 +10,7 @@ A fully functional, production-ready AI dashboard for the **Waveshare UGV-Beast*
 |------|-------------|
 | 🏠 **Home** | KPI metrics, architecture overview, enrolled persons table |
 | 📷 **Live Detection** | Real-time webcam/camera feed with GREEN/RED face bounding boxes |
-| 🖼 **Gallery** | Grid view of all captured face snapshots |
-| 👤 **Enroll Face** | Upload reference photos → compute 128-D embeddings |
+| 👤 **Enroll Face** | Multi-angle guided capture / photo upload → compute 128-D embeddings |
 | 📊 **System Info** | Full UGV specs, live CPU/RAM donuts, network config |
 
 ---
@@ -89,9 +88,8 @@ UGV Beast Waveshare/
 ├── start_dashboard.bat       # Windows launch script
 ├── pages/
 │   ├── 01_📷_Live_Detection.py
-│   ├── 02_🖼_Gallery.py
-│   ├── 03_👤_Enroll_Face.py
-│   └── 04_📊_System_Info.py
+│   ├── 02_👤_Enroll_Face.py
+│   └── 03_📊_System_Info.py
 ├── ugv/
 │   ├── camera.py             # OpenCV capture thread
 │   ├── esp32_comm.py         # HTTP JSON → robot
