@@ -1,0 +1,270 @@
+"""
+pages/04_🕹_Robot_Control.py
+=============================
+Manual robot control panel.
+
+- WASD directional drive buttons → JSON commands to ESP32 via Pi
+- Pan/Tilt sliders
+- Speed slider
+- LED toggle
+- Emergency stop
+- Battery + IMU live gauges
+"""
+
+import streamlit as st
+import os
+import sys
+import time
+import plotly.graph_objects as go
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import config
+from ugv import esp32_comm, telemetry
+
+st.set_page_config(page_title="Robot Control | UGV Beast", layout="wide", page_icon="🕹")
+
+st.markdown("""
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700;800&display=swap');
+html, body, [class*="css"] { font-family: 'Inter', sans-serif !important; }
+.stApp { background: linear-gradient(135deg, #0a0e1a 0%, #0d1b2e 100%); color: #e2e8f0; }
+[data-testid="stSidebar"] { background: linear-gradient(180deg, #0f172a 0%, #1e293b 100%); border-right: 1px solid #1e3a5f; }
+[data-testid="stSidebar"] * { color: #cbd5e1 !important; }
+footer { display: none !important; }
+header[data-testid="stHeader"] { background: transparent !important; }
+.ugv-card { background: linear-gradient(135deg,#1e293b,#0f172a); border:1px solid #334155;
+    border-radius:14px; padding:16px 20px; margin-bottom:12px; }
+.section-title { font-size:0.9rem; font-weight:700; color:#38bdf8; letter-spacing:0.6px;
+    text-transform:uppercase; margin-bottom:10px; border-bottom:1px solid #1e3a5f; padding-bottom:4px;}
+/* Drive buttons */
+.drive-btn > button {
+    background: linear-gradient(135deg, #1e3a5f, #0ea5e9) !important;
+    border: 1px solid #0ea5e9 !important;
+    border-radius: 10px !important;
+    color: white !important;
+    font-size: 1.4rem !important;
+    font-weight: 800 !important;
+    height: 64px !important;
+    width: 100% !important;
+    transition: all 0.15s;
+}
+.drive-btn > button:hover { background: linear-gradient(135deg, #0ea5e9, #6366f1) !important; transform: scale(1.05); }
+.stop-btn > button {
+    background: linear-gradient(135deg, #7f1d1d, #dc2626) !important;
+    border: 2px solid #ef4444 !important;
+    border-radius: 10px !important;
+    color: white !important;
+    font-size: 1.2rem !important;
+    font-weight: 800 !important;
+    height: 64px !important;
+    width: 100% !important;
+    transition: all 0.15s;
+    animation: pulse-stop 1.5s infinite;
+}
+@keyframes pulse-stop { 0%,100%{box-shadow:0 0 0 0 rgba(239,68,68,0.4)} 50%{box-shadow:0 0 0 8px rgba(239,68,68,0)} }
+[data-testid="metric-container"] { background:#1e293b; border:1px solid #334155; border-radius:12px; padding:12px 16px; }
+[data-testid="stMetricValue"] { color:#38bdf8 !important; font-weight:700 !important; }
+</style>
+""", unsafe_allow_html=True)
+
+st.markdown("""
+<h2 style="font-size:1.6rem; font-weight:800; color:#f1f5f9; margin-bottom:4px;">🕹 Robot Control Panel</h2>
+<p style="color:#64748b; font-size:0.85rem; margin-bottom:16px;">
+Drive the UGV Beast · Pan/Tilt servos · LED · Battery & IMU telemetry
+</p>
+""", unsafe_allow_html=True)
+
+if config.DEMO_MODE:
+    st.info("🟠 **Demo Mode** — Commands shown but not sent to robot. Disable in sidebar to go live.", icon="ℹ️")
+
+# ── Sidebar: speed + connection ───────────────────────────────────────────────
+with st.sidebar:
+    st.markdown("### ⚙️ Drive Settings")
+    speed = st.slider("Motor Speed", 0.1, 1.0, config.DEFAULT_SPEED, 0.05,
+                      help="Fraction 0–1 sent to left/right tracks")
+    turn_speed = st.slider("Turn Speed", 0.1, 1.0, 0.4, 0.05)
+    st.markdown("---")
+    st.markdown("### 📡 Connection")
+    online = esp32_comm.is_robot_online() if not config.DEMO_MODE else False
+    st.markdown(f"Robot: {'🟢 Online' if online else '🔴 Offline'}")
+    st.caption(f"URL: {config.UGV_BASE_URL}")
+
+# ── Layout ────────────────────────────────────────────────────────────────────
+ctrl_col, tele_col = st.columns([2, 3])
+
+with ctrl_col:
+    # ── Drive pad ──────────────────────────────────────────────────────────
+    st.markdown('<div class="section-title">🎮 Drive Controls</div>', unsafe_allow_html=True)
+
+    # Row 1: Forward
+    r1c1, r1c2, r1c3 = st.columns(3)
+    with r1c2:
+        st.markdown('<div class="drive-btn">', unsafe_allow_html=True)
+        if st.button("▲", key="fwd", help="Forward", use_container_width=True):
+            if not config.DEMO_MODE: esp32_comm.forward(speed)
+            st.toast("⬆ Forward")
+        st.markdown('</div>', unsafe_allow_html=True)
+
+    # Row 2: Left / Stop / Right
+    r2c1, r2c2, r2c3 = st.columns(3)
+    with r2c1:
+        st.markdown('<div class="drive-btn">', unsafe_allow_html=True)
+        if st.button("◄", key="left", help="Turn Left", use_container_width=True):
+            if not config.DEMO_MODE: esp32_comm.turn_left(turn_speed)
+            st.toast("◄ Left")
+        st.markdown('</div>', unsafe_allow_html=True)
+    with r2c2:
+        st.markdown('<div class="stop-btn">', unsafe_allow_html=True)
+        if st.button("■ STOP", key="stop", help="Emergency Stop", use_container_width=True):
+            if not config.DEMO_MODE: esp32_comm.stop()
+            st.toast("⏹ Stopped", icon="⛔")
+        st.markdown('</div>', unsafe_allow_html=True)
+    with r2c3:
+        st.markdown('<div class="drive-btn">', unsafe_allow_html=True)
+        if st.button("►", key="right", help="Turn Right", use_container_width=True):
+            if not config.DEMO_MODE: esp32_comm.turn_right(turn_speed)
+            st.toast("► Right")
+        st.markdown('</div>', unsafe_allow_html=True)
+
+    # Row 3: Backward
+    r3c1, r3c2, r3c3 = st.columns(3)
+    with r3c2:
+        st.markdown('<div class="drive-btn">', unsafe_allow_html=True)
+        if st.button("▼", key="bwd", help="Backward", use_container_width=True):
+            if not config.DEMO_MODE: esp32_comm.backward(speed)
+            st.toast("⬇ Backward")
+        st.markdown('</div>', unsafe_allow_html=True)
+
+    st.markdown("---")
+
+    # ── Pan/Tilt ──────────────────────────────────────────────────────────
+    st.markdown('<div class="section-title">🎯 Pan/Tilt Servos</div>', unsafe_allow_html=True)
+
+    if "pan"  not in st.session_state: st.session_state.pan  = config.PAN_CENTER
+    if "tilt" not in st.session_state: st.session_state.tilt = config.TILT_CENTER
+
+    pan_val  = st.slider("↔ Pan (0°–180°)",  config.PAN_MIN,  config.PAN_MAX,
+                         st.session_state.pan,  key="pan_slider")
+    tilt_val = st.slider("↕ Tilt (30°–150°)", config.TILT_MIN, config.TILT_MAX,
+                         st.session_state.tilt, key="tilt_slider")
+
+    pc1, pc2, pc3 = st.columns(3)
+    with pc1:
+        if st.button("Apply Pan/Tilt", use_container_width=True):
+            st.session_state.pan  = pan_val
+            st.session_state.tilt = tilt_val
+            if not config.DEMO_MODE:
+                esp32_comm.set_pan(pan_val)
+                esp32_comm.set_tilt(tilt_val)
+            st.toast(f"Pan={pan_val}° Tilt={tilt_val}°")
+    with pc2:
+        if st.button("🎯 Center", use_container_width=True):
+            st.session_state.pan  = config.PAN_CENTER
+            st.session_state.tilt = config.TILT_CENTER
+            if not config.DEMO_MODE:
+                esp32_comm.pan_tilt_center()
+            st.toast("Centered")
+
+    st.markdown("---")
+
+    # ── LED ───────────────────────────────────────────────────────────────
+    st.markdown('<div class="section-title">💡 LED Spotlight</div>', unsafe_allow_html=True)
+    led_on = st.toggle("LED On", value=False)
+    if st.button("Apply LED", use_container_width=True):
+        if not config.DEMO_MODE:
+            esp32_comm.set_led(led_on)
+        st.toast("💡 LED " + ("ON" if led_on else "OFF"))
+
+
+with tele_col:
+    tele = telemetry.get()
+
+    # ── Battery gauge ─────────────────────────────────────────────────────
+    st.markdown('<div class="section-title">🔋 Battery Status</div>', unsafe_allow_html=True)
+    voltage = tele.get("battery_voltage", 0.0)
+    current = tele.get("battery_current", 0.0)
+    bat_pct = tele.get("battery_percent", 0.0)
+
+    m1, m2, m3 = st.columns(3)
+    m1.metric("Voltage (V)",  f"{voltage:.2f}V",  delta="INA219")
+    m2.metric("Current (A)",  f"{current:.2f}A")
+    m3.metric("Charge %",     f"{bat_pct:.0f}%")
+
+    # Battery bar gauge
+    fig_bat = go.Figure(go.Indicator(
+        mode="gauge+number",
+        value=bat_pct,
+        number={"suffix": "%", "font": {"size": 28, "color": "#38bdf8"}},
+        gauge={
+            "axis": {"range": [0, 100], "tickcolor": "#475569"},
+            "bar": {"color": "#10b981" if bat_pct > 30 else "#ef4444"},
+            "bgcolor": "#1e293b",
+            "bordercolor": "#334155",
+            "steps": [
+                {"range": [0, 20],  "color": "#450a0a"},
+                {"range": [20, 50], "color": "#1c1917"},
+                {"range": [50, 100],"color": "#052e16"},
+            ],
+            "threshold": {"line": {"color": "#f97316", "width": 3}, "thickness": 0.75, "value": 20},
+        },
+        title={"text": "Battery Level", "font": {"size": 14, "color": "#94a3b8"}},
+    ))
+    fig_bat.update_layout(
+        paper_bgcolor="#0f172a",
+        plot_bgcolor="#0f172a",
+        font={"color": "#e2e8f0"},
+        height=220,
+        margin=dict(t=40, b=10, l=20, r=20),
+    )
+    st.plotly_chart(fig_bat, use_container_width=True)
+
+    st.markdown("---")
+
+    # ── IMU ───────────────────────────────────────────────────────────────
+    st.markdown('<div class="section-title">🧭 IMU — ICM20948 (9-Axis)</div>', unsafe_allow_html=True)
+    roll  = tele.get("imu_roll",  0.0)
+    pitch = tele.get("imu_pitch", 0.0)
+    yaw   = tele.get("imu_yaw",   0.0)
+
+    i1, i2, i3 = st.columns(3)
+    i1.metric("🔄 Roll",  f"{roll:.1f}°")
+    i2.metric("⬆ Pitch", f"{pitch:.1f}°")
+    i3.metric("🧭 Yaw",  f"{yaw:.1f}°")
+
+    # IMU visualization — radar-style
+    fig_imu = go.Figure()
+    fig_imu.add_trace(go.Scatterpolar(
+        r=[abs(roll), abs(pitch), abs(yaw)/2, abs(roll)],
+        theta=["Roll", "Pitch", "Yaw", "Roll"],
+        fill="toself",
+        line_color="#6366f1",
+        fillcolor="rgba(99,102,241,0.2)",
+        name="IMU",
+    ))
+    fig_imu.update_layout(
+        polar=dict(
+            bgcolor="#1e293b",
+            radialaxis=dict(visible=True, range=[0, 180], tickcolor="#475569", gridcolor="#334155"),
+            angularaxis=dict(tickcolor="#475569", gridcolor="#334155"),
+        ),
+        paper_bgcolor="#0f172a",
+        font={"color": "#e2e8f0"},
+        height=220,
+        margin=dict(t=20, b=10, l=20, r=20),
+        showlegend=False,
+    )
+    st.plotly_chart(fig_imu, use_container_width=True)
+
+    st.markdown("---")
+
+    # ── System metrics ────────────────────────────────────────────────────
+    st.markdown('<div class="section-title">🖥 Pi System</div>', unsafe_allow_html=True)
+    s1, s2, s3, s4 = st.columns(4)
+    s1.metric("CPU %",    f"{tele.get('cpu_percent', 0):.0f}%")
+    s2.metric("RAM %",    f"{tele.get('ram_percent', 0):.0f}%")
+    s3.metric("Disk %",   f"{tele.get('disk_percent', 0):.0f}%")
+    s4.metric("Temp °C",  f"{tele.get('cpu_temp', 0):.0f}°C")
+
+    if st.button("🔄 Refresh Telemetry", use_container_width=True):
+        telemetry.get.__globals__.get("_cache_ts", 0)  # noqa
+        st.rerun()

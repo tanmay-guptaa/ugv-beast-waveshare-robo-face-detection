@@ -1,0 +1,52 @@
+# ==============================================================================
+# .gitignore - UGV Beast Waveshare
+# ==============================================================================
+
+# Python bytecode & cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.pytest_cache/
+
+# Virtual environments
+.venv/
+venv/
+ENV/
+env/
+env.bak/
+venv.bak/
+
+# Environment variables & secrets
+.env
+.env*.local
+!.env.example
+.streamlit/secrets.toml
+
+# Scratch / temporary debugging files & logs
+scratch/
+temp/
+tmp/
+*.tmp
+*.log
+
+# Biometric face dataset & user captures
+# (Ignore captured face images and generated embeddings to protect privacy)
+dataset/known_faces/*
+!dataset/known_faces/.gitkeep
+dataset/*.pkl
+dataset/*.npz
+
+# Operating System files
+.DS_Store
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+
+# IDEs & Editor configurations
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
