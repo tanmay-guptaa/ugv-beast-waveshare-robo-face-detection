@@ -38,13 +38,19 @@ _frame_count  = 0
 _ready_event  = threading.Event()   # set once first frame arrives
 
 
-def _capture_loop(source: int = 0):
+def _capture_loop(source=None):
     global _latest_frame, _camera_running, _fps, _frame_count
 
-    # On Windows, CAP_DSHOW skips OpenCV's backend-probing loop (2-3 s delay).
-    # On Linux/macOS the flag is ignored, so this is always safe to pass.
-    backend = cv2.CAP_DSHOW if sys.platform == "win32" else cv2.CAP_ANY
-    cap = cv2.VideoCapture(source, backend)
+    if source is None:
+        source = getattr(config, "CAMERA_SOURCE", 0)
+
+    # Use DirectShow on Windows ONLY for local hardware webcams (numeric index).
+    # For HTTP/RTSP URLs (e.g. UGV Beast video_feed), use default FFMPEG backend.
+    if isinstance(source, int):
+        backend = cv2.CAP_DSHOW if sys.platform == "win32" else cv2.CAP_ANY
+        cap = cv2.VideoCapture(source, backend)
+    else:
+        cap = cv2.VideoCapture(str(source))
 
     # Resolution & frame rate
     cap.set(cv2.CAP_PROP_FRAME_WIDTH,  640)
@@ -80,11 +86,25 @@ def _capture_loop(source: int = 0):
     _ready_event.clear()
 
 
-def start(source: int = 0):
+_active_source = None
+
+
+def start(source=None):
     """Start background capture thread."""
-    global _camera_running, _camera_thread
-    if _camera_running:
+    global _camera_running, _camera_thread, _active_source
+    if source is None:
+        source = getattr(config, "CAMERA_SOURCE", 0)
+
+    # If already running with this exact source, don't restart
+    if _camera_running and _active_source == source:
         return
+
+    # If running with a different source, stop the current camera first
+    if _camera_running:
+        stop()
+        time.sleep(0.2)
+
+    _active_source = source
     _ready_event.clear()
     _camera_running = True
     _camera_thread = threading.Thread(target=_capture_loop, args=(source,), daemon=True)
@@ -93,8 +113,9 @@ def start(source: int = 0):
 
 def stop():
     """Stop the capture thread and release the camera."""
-    global _camera_running, _latest_frame
+    global _camera_running, _latest_frame, _active_source
     _camera_running = False
+    _active_source = None
     _ready_event.clear()
     with _frame_lock:
         _latest_frame = None

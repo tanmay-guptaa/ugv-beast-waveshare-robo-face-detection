@@ -210,7 +210,9 @@ with wizard_col:
     with cam_col1:
         if not st.session_state.wizard_cam_on:
             if st.button("▶ Open Camera", use_container_width=True):
-                camera.start(0)
+                camera.stop()
+                time.sleep(0.15)
+                camera.start(0)  # Always use laptop webcam (index 0) for enrollment
                 st.session_state.wizard_cam_on = True
                 st.rerun()
         else:
@@ -222,6 +224,10 @@ with wizard_col:
     with cam_col2:
         if st.button("📸 Capture Angle", use_container_width=True, disabled=not st.session_state.wizard_cam_on):
             st.session_state["_do_capture"] = True
+
+    # Ensure laptop camera index 0 is active when wizard camera is on
+    if st.session_state.wizard_cam_on and getattr(camera, "_active_source", None) != 0:
+        camera.start(0)
 
     # ── Live Camera Fragment with Pose-Guided Validation ─────────────────────
     @st.fragment(run_every=0.1 if st.session_state.wizard_cam_on else None)

@@ -74,20 +74,47 @@ header[data-testid="stHeader"] { background: transparent !important; }
 </style>
 """, unsafe_allow_html=True)
 
+# ── Sidebar Camera & Detection Controls ───────────────────────────────────────
+st.sidebar.markdown('<div class="section-title">⚙️ Camera & Tracking</div>', unsafe_allow_html=True)
+
+# Camera source switcher
+cam_options = ["🤖 UGV Beast Camera", "💻 Laptop Webcam"]
+# Default to UGV Beast Camera when robot is configured
+default_idx = 0 if not isinstance(config.CAMERA_SOURCE, int) else 1
+cam_source_choice = st.sidebar.radio("Camera Source", options=cam_options, index=default_idx)
+
+current_target_source = config.CAMERA_SOURCE if "UGV" in cam_source_choice else 0
+
+if "active_cam_source" not in st.session_state:
+    st.session_state.active_cam_source = current_target_source
+
+# If user switches camera source in UI, restart camera thread with new source
+if st.session_state.active_cam_source != current_target_source:
+    st.session_state.active_cam_source = current_target_source
+    camera.stop()
+    time.sleep(0.3)
+    camera.start(current_target_source)
+    st.session_state.cam_started = True
+    st.rerun()
+
+run_detection = st.sidebar.checkbox("👁 Run Face Recognition", value=True)
+auto_track = st.sidebar.checkbox("🎯 Auto Pan/Tilt Tracking", value=True)
+
 # ── Session state init ────────────────────────────────────────────────────────
 if "cam_started" not in st.session_state:
     st.session_state.cam_started = True
-    camera.start(0)
+    camera.start(st.session_state.active_cam_source)
 
 # ── Page header ───────────────────────────────────────────────────────────────
 col_title, col_actions = st.columns([5, 1])
 with col_title:
-    st.markdown("""
+    src_label = "🤖 UGV Beast Robot Stream" if "UGV" in cam_source_choice else "💻 Laptop Webcam"
+    st.markdown(f"""
     <h2 style="font-size:1.6rem; font-weight:800; color:#f1f5f9; margin-bottom:4px;">
         📷 Live Face Detection
     </h2>
     <p style="color:#64748b; font-size:0.85rem; margin-bottom:12px;">
-        High-performance live camera feed with real-time face detection & auto-tracking
+        Connected to: <span style="color:#38bdf8; font-weight:600;">{src_label}</span>
     </p>
     """, unsafe_allow_html=True)
 
@@ -99,14 +126,9 @@ with col_actions:
             st.rerun()
     else:
         if st.button("▶ Start", use_container_width=True):
-            camera.start(0)
+            camera.start(st.session_state.active_cam_source)
             st.session_state.cam_started = True
             st.rerun()
-
-# ── Camera configuration defaults ─────────────────────────────────────────────
-cam_source = config.DEFAULT_CAMERA_INDEX
-run_detection = True
-auto_track = False
 
 
 # ── Live Stream Fragment (No-flicker in-place updates) ─────────────────────────

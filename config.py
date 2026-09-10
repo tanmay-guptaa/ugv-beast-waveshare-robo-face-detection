@@ -34,11 +34,23 @@ UGV_IP   = os.environ.get("UGV_IP",   "192.168.50.5")
 UGV_PORT = int(os.environ.get("UGV_PORT", "5000"))
 UGV_BASE_URL = f"http://{UGV_IP}:{UGV_PORT}"
 
+# ─── Demo / Dev mode ──────────────────────────────────────────────────────────
+# Set True when running on Windows without the Pi nearby.
+DEMO_MODE = os.environ.get("UGV_DEMO", "1") == "1"
+
 # ─── Streamlit server ─────────────────────────────────────────────────────────
 DASHBOARD_PORT = int(os.environ.get("DASHBOARD_PORT", "8501"))
 
 # ─── Camera Configuration ─────────────────────────────────────────────────────
-DEFAULT_CAMERA_INDEX = int(os.environ.get("CAMERA_INDEX", "0"))
+_cam_env = os.environ.get("CAMERA_SOURCE", os.environ.get("CAMERA_INDEX", "")).strip()
+if not _cam_env:
+    CAMERA_SOURCE = f"http://{UGV_IP}:{UGV_PORT}/video_feed" if not DEMO_MODE else 0
+elif _cam_env.isdigit():
+    CAMERA_SOURCE = int(_cam_env)
+else:
+    CAMERA_SOURCE = _cam_env
+
+DEFAULT_CAMERA_INDEX = CAMERA_SOURCE
 
 # ─── File System Paths ────────────────────────────────────────────────────────
 DATASET_DIR       = os.path.join(BASE_DIR, "dataset", "known_faces")
@@ -61,10 +73,6 @@ TILT_MAX    = 150
 
 # ─── Motor speed ──────────────────────────────────────────────────────────────
 DEFAULT_SPEED = float(os.environ.get("DEFAULT_SPEED", "0.5"))   # 0.0 – 1.0
-
-# ─── Demo / Dev mode ──────────────────────────────────────────────────────────
-# Set True when running on Windows without the Pi nearby.
-DEMO_MODE = os.environ.get("UGV_DEMO", "1") == "1"
 
 # ─── Known person displayed in demo sidebar ───────────────────────────────────
 DEMO_PERSON = {
