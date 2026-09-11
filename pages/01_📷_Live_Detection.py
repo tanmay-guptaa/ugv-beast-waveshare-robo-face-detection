@@ -171,8 +171,20 @@ def live_stream_fragment():
     conf     = det_info.get("confidence", 0.0)
 
     # 🔊 Voice greeting: say "Hello [Name]" on UGV Beast speaker when recognised
-    if is_known and name not in ("No Face", "Unknown", ""):
-        face_engine.speak_on_ugv(name)
+    # Temporal filter: require 2 consecutive frames of the same confirmed person
+    # to completely eliminate single-frame glitches and guarantee strangers are never greeted.
+    if is_known and name not in ("No Face", "Unknown", "Stranger", ""):
+        if st.session_state.get("_detected_streak_person") == name:
+            st.session_state["_detected_streak_count"] = st.session_state.get("_detected_streak_count", 0) + 1
+        else:
+            st.session_state["_detected_streak_person"] = name
+            st.session_state["_detected_streak_count"] = 1
+
+        if st.session_state["_detected_streak_count"] >= 2:
+            face_engine.speak_on_ugv(name)
+    else:
+        st.session_state["_detected_streak_count"] = 0
+        st.session_state["_detected_streak_person"] = None
 
     # Robot pan/tilt auto-tracking
     if auto_track and det_info.get("box") is not None and not config.DEMO_MODE:

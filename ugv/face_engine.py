@@ -50,8 +50,8 @@ _recognizer  = None   # SFace 128-D embedding extractor
 _cur_w, _cur_h = 0, 0
 _detect_lock = threading.Lock()
 
-# SFace cosine similarity threshold (0.363 is OpenCV's standard threshold)
-_SFACE_THRESHOLD = 0.363
+# SFace cosine similarity threshold (0.48 reliably separates enrolled faces from strangers)
+_SFACE_THRESHOLD = 0.48
 
 def _get_detector(w: int, h: int):
     """Return a YuNet FaceDetectorYN configured for the given frame size (thread-safe)."""
@@ -152,8 +152,9 @@ def load_database():
                 _metadata = json.load(f)
         except Exception:
             _metadata = []
-    else:
-        _metadata = []
+    # Pre-generate greeting audio on the Pi in background for each known person
+    for p_name in list(_embeddings.keys()):
+        pregenerate_greeting_audio(p_name)
 
 
 def save_database():
@@ -350,12 +351,18 @@ def _generate_piper_wav_on_pi(target_ip: str, name: str, wav_filename: str) -> b
         ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
         ssh.connect(target_ip, port=ssh_port, username=ssh_user, password=ssh_pass, timeout=3.0)
 
-        remote_wav = f"/home/{ssh_user}/ugv_rpi/sounds/others/{wav_filename}"
+        remote_wav = f"/home/{ssh_user}/ugv_rpi/sounds/greetings/{wav_filename}"
         piper_bin = f"/home/{ssh_user}/ugv_rpi/piper/piper/piper"
         piper_model = f"/home/{ssh_user}/ugv_rpi/piper/en_US-lessac-medium.onnx"
+        espeak_data = f"/home/{ssh_user}/ugv_rpi/piper/piper/espeak-ng-data"
+        piper_lib = f"/home/{ssh_user}/ugv_rpi/piper/piper"
 
-        gen_cmd = f"echo '{greeting}' | {piper_bin} --model {piper_model} --output_file {remote_wav}"
-        stdin, stdout, stderr = ssh.exec_command(gen_cmd)
+        gen_cmd = (
+            f"mkdir -p /home/{ssh_user}/ugv_rpi/sounds/greetings && "
+            f"echo '{greeting}' | LD_LIBRARY_PATH={piper_lib} {piper_bin} "
+            f"-m {piper_model} --output_file {remote_wav} --espeak_data {espeak_data}"
+        )
+        _, stdout, _ = ssh.exec_command(gen_cmd)
         exit_code = stdout.channel.recv_exit_status()
         ssh.close()
         return exit_code == 0
@@ -367,48 +374,75 @@ def _generate_piper_wav_on_pi(target_ip: str, name: str, wav_filename: str) -> b
 def _run_tts_on_pi(name: str) -> None:
     """
     Execute speech greeting on the UGV Beast onboard speaker exactly ONCE.
-    Strategy 1: Native /playAudio via Waveshare Flask server (plays greet_{name}.wav).
-    Strategy 2: If WAV not found, generate it on Pi via Piper and trigger /playAudio.
-    Strategy 3: UDP packet to voice_cmd listener on port 5055 ONLY if /playAudio fails.
+    Uses ALSA plug:dmix_out directly over SSH for clean, conflict-free audio output.
+    1. Plays pre-generated WAV /home/ws/ugv_rpi/sounds/greetings/greet_{name}.wav
+    2. If not generated yet, generates it with Piper and plays it.
+    3. Fast fallback: espeak piped to aplay -D plug:dmix_out.
     Runs in a background thread so the camera stream is never delayed.
     """
     target_ip = getattr(config, "UGV_IP", "192.168.80.154")
-    target_port = getattr(config, "UGV_PORT", 5000)
+    ssh_user = getattr(config, "UGV_SSH_USER", "ws")
+    ssh_pass = getattr(config, "UGV_SSH_PASS", "ws")
+    ssh_port = getattr(config, "UGV_SSH_PORT", 22)
 
     first_name = name.strip().split()[0] if name.strip() else name
     safe_name = "".join(c for c in first_name.lower() if c.isalnum())
     wav_filename = f"greet_{safe_name}.wav"
     greeting = f"Hello {first_name}"
+    remote_wav = f"/home/{ssh_user}/ugv_rpi/sounds/greetings/{wav_filename}"
 
-    # 1. Primary: Trigger native playback via robot's /playAudio endpoint
-    play_url = f"http://{target_ip}:{target_port}/playAudio"
     try:
-        resp = requests.post(play_url, data={"audio_file": wav_filename}, timeout=1.5)
-        if resp.status_code == 200:
-            print(f"[TTS] Played greeting for '{name}' via robot speaker (/playAudio)")
-            return  # RETURN IMMEDIATELY — DO NOT TRIGGER SECOND CHANNEL
-    except Exception:
-        pass
+        import paramiko
+        ssh = paramiko.SSHClient()
+        ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        ssh.connect(target_ip, port=ssh_port, username=ssh_user, password=ssh_pass, timeout=3.0)
 
-    # 2. If WAV does not exist yet on Pi, generate it with Piper and play
-    if _generate_piper_wav_on_pi(target_ip, name, wav_filename):
+        # 1. Primary: If the WAV exists, play it instantly via plug:dmix_out
+        chk_cmd = f"test -f {remote_wav} && aplay -q -D plug:dmix_out {remote_wav}"
+        _, stdout, _ = ssh.exec_command(chk_cmd)
+        if stdout.channel.recv_exit_status() == 0:
+            print(f"[TTS] Played greeting for '{name}' via robot speaker (aplay dmix)")
+            ssh.close()
+            return
+
+        # 2. If WAV doesn't exist, generate it with Piper and play
+        piper_bin = f"/home/{ssh_user}/ugv_rpi/piper/piper/piper"
+        piper_model = f"/home/{ssh_user}/ugv_rpi/piper/en_US-lessac-medium.onnx"
+        espeak_data = f"/home/{ssh_user}/ugv_rpi/piper/piper/espeak-ng-data"
+        piper_lib = f"/home/{ssh_user}/ugv_rpi/piper/piper"
+
+        gen_and_play = (
+            f"mkdir -p /home/{ssh_user}/ugv_rpi/sounds/greetings && "
+            f"echo '{greeting}' | LD_LIBRARY_PATH={piper_lib} {piper_bin} "
+            f"-m {piper_model} --output_file {remote_wav} --espeak_data {espeak_data} && "
+            f"aplay -q -D plug:dmix_out {remote_wav}"
+        )
+        _, stdout, _ = ssh.exec_command(gen_and_play)
+        if stdout.channel.recv_exit_status() == 0:
+            print(f"[TTS] Generated and played greeting for '{name}' via Piper on robot")
+            ssh.close()
+            return
+
+        # 3. Fast fallback: espeak directly via plug:dmix_out
+        espeak_cmd = f"espeak '{greeting}' --stdout | aplay -q -D plug:dmix_out"
+        _, stdout, _ = ssh.exec_command(espeak_cmd)
+        if stdout.channel.recv_exit_status() == 0:
+            print(f"[TTS] Played greeting for '{name}' via espeak fallback")
+            ssh.close()
+            return
+
+        ssh.close()
+    except Exception as exc:
+        print(f"[TTS] SSH audio execution failed: {exc}")
+        # Last resort fallback: UDP port 5055 to voice_cmd.py
         try:
-            resp = requests.post(play_url, data={"audio_file": wav_filename}, timeout=1.5)
-            if resp.status_code == 200:
-                print(f"[TTS] Generated and played greeting for '{name}' via robot speaker")
-                return  # RETURN IMMEDIATELY
-        except Exception as exc:
-            print(f"[TTS] Play request failed after generation: {exc}")
-
-    # 3. Fallback ONLY if /playAudio failed completely: UDP port 5055
-    try:
-        import socket
-        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        sock.sendto(greeting.encode("utf-8"), (target_ip, 5055))
-        sock.close()
-        print(f"[TTS] Played greeting for '{name}' via UDP fallback")
-    except Exception:
-        pass
+            import socket
+            sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            sock.sendto(greeting.encode("utf-8"), (target_ip, 5055))
+            sock.close()
+            print(f"[TTS] Sent greeting to UDP fallback 5055")
+        except Exception:
+            pass
 
 
 def pregenerate_greeting_audio(name: str) -> None:
