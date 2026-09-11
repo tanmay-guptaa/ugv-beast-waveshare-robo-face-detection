@@ -21,6 +21,7 @@ import cv2
 import json
 import pickle
 import time
+import threading
 import requests
 import numpy as np
 from datetime import datetime
@@ -274,6 +275,117 @@ def inspect_ugv_storage() -> tuple[bool, str]:
         return True, output
     except Exception as e:
         return False, f"Could not reach Raspberry Pi: {str(e)}"
+
+
+# ─── Voice Greeting Engine ────────────────────────────────────────────────────
+# Tracks last greeting time per person to avoid repeating every frame
+_last_greeted: dict[str, float] = {}
+_GREET_COOLDOWN_SEC = 25.0   # seconds between greetings for the same person
+
+def _generate_piper_wav_on_pi(target_ip: str, name: str, wav_filename: str) -> bool:
+    """Generate greeting WAV file on Raspberry Pi using Piper neural TTS."""
+    ssh_user = getattr(config, "UGV_SSH_USER", "ws")
+    ssh_pass = getattr(config, "UGV_SSH_PASS", "ws")
+    ssh_port = getattr(config, "UGV_SSH_PORT", 22)
+    first_name = name.strip().split()[0] if name.strip() else name
+    greeting = f"Hello {first_name}"
+
+    try:
+        import paramiko
+        ssh = paramiko.SSHClient()
+        ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        ssh.connect(target_ip, port=ssh_port, username=ssh_user, password=ssh_pass, timeout=3.0)
+
+        remote_wav = f"/home/{ssh_user}/ugv_rpi/sounds/others/{wav_filename}"
+        piper_bin = f"/home/{ssh_user}/ugv_rpi/piper/piper/piper"
+        piper_model = f"/home/{ssh_user}/ugv_rpi/piper/en_US-lessac-medium.onnx"
+
+        gen_cmd = f"echo '{greeting}' | {piper_bin} --model {piper_model} --output_file {remote_wav}"
+        stdin, stdout, stderr = ssh.exec_command(gen_cmd)
+        exit_code = stdout.channel.recv_exit_status()
+        ssh.close()
+        return exit_code == 0
+    except Exception as exc:
+        print(f"[TTS] Error generating Piper WAV on Pi: {exc}")
+        return False
+
+
+def _run_tts_on_pi(name: str) -> None:
+    """
+    Execute speech greeting on the UGV Beast onboard speaker.
+    Strategy 1: Instant HTTP POST to UGV Beast native audio endpoint (/playAudio).
+                Uses cached/pregenerated WAV with zero ALSA/device conflicts.
+    Strategy 2: If WAV not found, generate it on Pi via Piper and trigger /playAudio.
+    Strategy 3: UDP packet to voice_cmd listener on port 5055.
+    Runs in a background thread so the camera stream is never delayed.
+    """
+    target_ip = getattr(config, "UGV_IP", "192.168.80.154")
+    target_port = getattr(config, "UGV_PORT", 5000)
+
+    first_name = name.strip().split()[0] if name.strip() else name
+    safe_name = "".join(c for c in first_name.lower() if c.isalnum())
+    wav_filename = f"greet_{safe_name}.wav"
+    greeting = f"Hello {first_name}"
+
+    # 1. Fire UDP notification to rover-voice service (listening on port 5055)
+    try:
+        import socket
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sock.sendto(greeting.encode("utf-8"), (target_ip, 5055))
+        sock.close()
+    except Exception:
+        pass
+
+    # 2. Trigger native playback on the robot speaker via Waveshare's Flask server
+    play_url = f"http://{target_ip}:{target_port}/playAudio"
+    try:
+        resp = requests.post(play_url, data={"audio_file": wav_filename}, timeout=1.5)
+        if resp.status_code == 200:
+            print(f"[TTS] Played greeting for '{name}' via robot speaker (/playAudio)")
+            return
+    except Exception:
+        pass
+
+    # 3. If WAV does not exist yet on Pi, generate it with Piper and play
+    if _generate_piper_wav_on_pi(target_ip, name, wav_filename):
+        try:
+            requests.post(play_url, data={"audio_file": wav_filename}, timeout=1.5)
+            print(f"[TTS] Generated and played greeting for '{name}' via robot speaker")
+        except Exception as exc:
+            print(f"[TTS] Play request failed after generation: {exc}")
+
+
+def pregenerate_greeting_audio(name: str) -> None:
+    """Pre-generate the greeting WAV on the robot so playback is instant."""
+    def _task():
+        target_ip = getattr(config, "UGV_IP", "192.168.80.154")
+        first_name = name.strip().split()[0] if name.strip() else name
+        safe_name = "".join(c for c in first_name.lower() if c.isalnum())
+        wav_filename = f"greet_{safe_name}.wav"
+        _generate_piper_wav_on_pi(target_ip, name, wav_filename)
+    threading.Thread(target=_task, daemon=True).start()
+
+
+def speak_on_ugv(name: str) -> bool:
+    """
+    Say 'Hello [Name]' on the UGV Beast's onboard speaker if cooldown has passed.
+    Call this each time a known face is detected.
+    Returns True if greeting was triggered, False if cooldown still active.
+    """
+    if not name or name in ("Stranger", "Unknown", "No Face", ""):
+        return False
+
+    now = time.time()
+    last = _last_greeted.get(name, 0.0)
+    if now - last < _GREET_COOLDOWN_SEC:
+        return False   # Still within cooldown — do not repeat
+
+    _last_greeted[name] = now
+
+    # Fire-and-forget in background thread — does NOT block the camera loop
+    t = threading.Thread(target=_run_tts_on_pi, args=(name,), daemon=True)
+    t.start()
+    return True
 
 
 def get_metadata(name: str) -> Optional[dict]:

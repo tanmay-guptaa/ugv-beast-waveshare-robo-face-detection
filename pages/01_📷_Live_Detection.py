@@ -152,7 +152,7 @@ def live_stream_fragment():
             <strong style="color: #f1f5f9;">Connecting to camera index {}...</strong>
             <span style="font-size: 0.85rem; color: #64748b; margin-top: 6px;">Ensure webcam or UGV camera is connected</span>
         </div>
-        """.format(cam_source), unsafe_allow_html=True)
+        """.format(st.session_state.get("active_cam_source", "Live")), unsafe_allow_html=True)
         return
 
     # Run detection
@@ -169,6 +169,10 @@ def live_stream_fragment():
     is_known = det_info.get("is_known", False)
     name     = det_info.get("name", "No Face")
     conf     = det_info.get("confidence", 0.0)
+
+    # 🔊 Voice greeting: say "Hello [Name]" on UGV Beast speaker when recognised
+    if is_known and name not in ("No Face", "Unknown", ""):
+        face_engine.speak_on_ugv(name)
 
     # Robot pan/tilt auto-tracking
     if auto_track and det_info.get("box") is not None and not config.DEMO_MODE:
