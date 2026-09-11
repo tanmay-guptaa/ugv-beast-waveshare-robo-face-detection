@@ -131,10 +131,24 @@ def load_database():
     else:
         _embeddings = {}
 
+    # Also load/merge from database_embeddings.json if available
+    json_embs_path = os.path.join(os.path.dirname(config.DATABASE_PKL), "database_embeddings.json")
+    if os.path.isfile(json_embs_path):
+        try:
+            with open(json_embs_path, "r", encoding="utf-8") as f:
+                readable = json.load(f)
+            for p_name, vecs in readable.items():
+                if p_name not in _embeddings or len(_embeddings[p_name]) == 0:
+                    _embeddings[p_name] = [
+                        np.array(v, dtype=np.float32).reshape(1, -1) for v in vecs
+                    ]
+        except Exception:
+            pass
+
     # Load JSON metadata
     if os.path.isfile(config.DATABASE_JSON):
         try:
-            with open(config.DATABASE_JSON, "r") as f:
+            with open(config.DATABASE_JSON, "r", encoding="utf-8") as f:
                 _metadata = json.load(f)
         except Exception:
             _metadata = []
@@ -251,6 +265,46 @@ def sync_to_ugv(ip: Optional[str] = None, port: Optional[int] = None, timeout: f
         return False, f"Sync error: {str(e)}"
 
 
+def sync_from_ugv(ip: Optional[str] = None, timeout: float = 4.0) -> tuple[bool, str]:
+    """
+    Download embeddings and metadata stored on Raspberry Pi to the local dashboard.
+    Enables recognizing faces using embeddings created or saved on the Pi.
+    """
+    target_ip = ip or getattr(config, "UGV_IP", "192.168.80.154")
+    ssh_user  = getattr(config, "UGV_SSH_USER", "ws")
+    ssh_pass  = getattr(config, "UGV_SSH_PASS", "ws")
+    ssh_port  = getattr(config, "UGV_SSH_PORT", 22)
+
+    try:
+        import paramiko
+        ssh = paramiko.SSHClient()
+        ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        ssh.connect(target_ip, port=ssh_port, username=ssh_user, password=ssh_pass, timeout=timeout)
+        sftp = ssh.open_sftp()
+
+        remote_embs = f"/home/{ssh_user}/ugv_rpi/dataset/database_embeddings.json"
+        remote_db   = f"/home/{ssh_user}/ugv_rpi/database.json"
+
+        local_embs = os.path.join(os.path.dirname(config.DATABASE_PKL), "database_embeddings.json")
+        local_db   = config.DATABASE_JSON
+
+        os.makedirs(os.path.dirname(local_embs), exist_ok=True)
+        sftp.get(remote_embs, local_embs)
+        try:
+            sftp.get(remote_db, local_db)
+        except Exception:
+            pass
+
+        sftp.close()
+        ssh.close()
+
+        # Reload newly pulled database into memory
+        load_database()
+        return True, f"Successfully loaded {len(_embeddings)} face profile(s) from Raspberry Pi"
+    except Exception as exc:
+        return False, f"Failed to pull embeddings from Pi: {exc}"
+
+
 def inspect_ugv_storage() -> tuple[bool, str]:
     """SSH into the Pi and read back what is physically saved there."""
     target_ip = getattr(config, "UGV_IP",      "192.168.80.154")
@@ -312,11 +366,10 @@ def _generate_piper_wav_on_pi(target_ip: str, name: str, wav_filename: str) -> b
 
 def _run_tts_on_pi(name: str) -> None:
     """
-    Execute speech greeting on the UGV Beast onboard speaker.
-    Strategy 1: Instant HTTP POST to UGV Beast native audio endpoint (/playAudio).
-                Uses cached/pregenerated WAV with zero ALSA/device conflicts.
+    Execute speech greeting on the UGV Beast onboard speaker exactly ONCE.
+    Strategy 1: Native /playAudio via Waveshare Flask server (plays greet_{name}.wav).
     Strategy 2: If WAV not found, generate it on Pi via Piper and trigger /playAudio.
-    Strategy 3: UDP packet to voice_cmd listener on port 5055.
+    Strategy 3: UDP packet to voice_cmd listener on port 5055 ONLY if /playAudio fails.
     Runs in a background thread so the camera stream is never delayed.
     """
     target_ip = getattr(config, "UGV_IP", "192.168.80.154")
@@ -327,32 +380,35 @@ def _run_tts_on_pi(name: str) -> None:
     wav_filename = f"greet_{safe_name}.wav"
     greeting = f"Hello {first_name}"
 
-    # 1. Fire UDP notification to rover-voice service (listening on port 5055)
-    try:
-        import socket
-        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        sock.sendto(greeting.encode("utf-8"), (target_ip, 5055))
-        sock.close()
-    except Exception:
-        pass
-
-    # 2. Trigger native playback on the robot speaker via Waveshare's Flask server
+    # 1. Primary: Trigger native playback via robot's /playAudio endpoint
     play_url = f"http://{target_ip}:{target_port}/playAudio"
     try:
         resp = requests.post(play_url, data={"audio_file": wav_filename}, timeout=1.5)
         if resp.status_code == 200:
             print(f"[TTS] Played greeting for '{name}' via robot speaker (/playAudio)")
-            return
+            return  # RETURN IMMEDIATELY — DO NOT TRIGGER SECOND CHANNEL
     except Exception:
         pass
 
-    # 3. If WAV does not exist yet on Pi, generate it with Piper and play
+    # 2. If WAV does not exist yet on Pi, generate it with Piper and play
     if _generate_piper_wav_on_pi(target_ip, name, wav_filename):
         try:
-            requests.post(play_url, data={"audio_file": wav_filename}, timeout=1.5)
-            print(f"[TTS] Generated and played greeting for '{name}' via robot speaker")
+            resp = requests.post(play_url, data={"audio_file": wav_filename}, timeout=1.5)
+            if resp.status_code == 200:
+                print(f"[TTS] Generated and played greeting for '{name}' via robot speaker")
+                return  # RETURN IMMEDIATELY
         except Exception as exc:
             print(f"[TTS] Play request failed after generation: {exc}")
+
+    # 3. Fallback ONLY if /playAudio failed completely: UDP port 5055
+    try:
+        import socket
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sock.sendto(greeting.encode("utf-8"), (target_ip, 5055))
+        sock.close()
+        print(f"[TTS] Played greeting for '{name}' via UDP fallback")
+    except Exception:
+        pass
 
 
 def pregenerate_greeting_audio(name: str) -> None:
