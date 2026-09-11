@@ -397,6 +397,22 @@ def _run_tts_on_pi(name: str) -> None:
         ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
         ssh.connect(target_ip, port=ssh_port, username=ssh_user, password=ssh_pass, timeout=3.0)
 
+        # Check shared cooldown with the Raspberry Pi onboard service to prevent double-speaking
+        cmd = f"python3 -c \\\"import json, os, time; f='/home/{ssh_user}/ugv_rpi/.last_greeted'; d = json.load(open(f)) if os.path.exists(f) else {{}}; print(time.time() - float(d.get('{name}', 0)))\\\""
+        _, stdout, _ = ssh.exec_command(cmd)
+        try:
+            delta = float(stdout.read().decode().strip())
+            if delta < _GREET_COOLDOWN_SEC:
+                # Robot onboard service already spoke recently
+                ssh.close()
+                return
+        except Exception:
+            pass
+
+        # Update shared cooldown timestamp on the Pi
+        update_cmd = f"python3 -c \\\"import json, os, time; f='/home/{ssh_user}/ugv_rpi/.last_greeted'; d = json.load(open(f)) if os.path.exists(f) else {{}}; d['{name}'] = time.time(); json.dump(d, open(f, 'w'))\\\""
+        ssh.exec_command(update_cmd)
+
         # 1. Primary: If the WAV exists, play it instantly via plug:dmix_out
         chk_cmd = f"test -f {remote_wav} && aplay -q -D plug:dmix_out {remote_wav}"
         _, stdout, _ = ssh.exec_command(chk_cmd)
