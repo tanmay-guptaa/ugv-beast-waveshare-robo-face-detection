@@ -21,6 +21,7 @@ import cv2
 import json
 import pickle
 import time
+import requests
 import numpy as np
 from datetime import datetime
 from typing import Optional
@@ -161,6 +162,118 @@ def save_database():
             json.dump(readable_embs, f, indent=2)
     except Exception:
         pass
+
+def get_serializable_embeddings() -> dict:
+    """Return in-memory embeddings as a JSON-serializable dict of float lists."""
+    result = {}
+    for name, vecs in _embeddings.items():
+        result[name] = [
+            [round(float(v), 6) for v in (vec.flatten() if hasattr(vec, "flatten") else vec)]
+            for vec in vecs
+        ]
+    return result
+
+
+def sync_to_ugv(ip: Optional[str] = None, port: Optional[int] = None, timeout: float = 4.0) -> tuple[bool, str]:
+    """
+    Sync embeddings and metadata to the Raspberry Pi.
+    Strategy 1: Direct SFTP file copy (zero Pi-side config needed).
+    Strategy 2: HTTP POST fallback if SFTP unavailable.
+    """
+    target_ip   = ip   or getattr(config, "UGV_IP",       "192.168.80.154")
+    ssh_user    = getattr(config, "UGV_SSH_USER",  "ws")
+    ssh_pass    = getattr(config, "UGV_SSH_PASS",  "ws")
+    ssh_port    = getattr(config, "UGV_SSH_PORT",  22)
+
+    # Ensure files are flushed to disk before transfer
+    save_database()
+    local_embs = os.path.join(os.path.dirname(config.DATABASE_PKL), "database_embeddings.json")
+    local_db   = config.DATABASE_JSON
+
+    # ── Strategy 1: Direct SFTP ──────────────────────────────────────────────
+    try:
+        import paramiko
+        ssh = paramiko.SSHClient()
+        ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        ssh.connect(target_ip, port=ssh_port, username=ssh_user, password=ssh_pass, timeout=timeout)
+        sftp = ssh.open_sftp()
+
+        remote_dirs = [
+            f"/home/{ssh_user}/ugv_rpi/dataset",
+            f"/home/{ssh_user}/dataset",
+        ]
+        for r_dir in remote_dirs:
+            try:
+                sftp.mkdir(r_dir)
+            except Exception:
+                pass
+
+        dest_embs = f"/home/{ssh_user}/ugv_rpi/dataset/database_embeddings.json"
+        dest_db   = f"/home/{ssh_user}/ugv_rpi/database.json"
+        sftp.put(local_embs, dest_embs)
+        sftp.put(local_db,   dest_db)
+
+        # Backup copy in home dir
+        try:
+            sftp.put(local_embs, f"/home/{ssh_user}/dataset/database_embeddings.json")
+            sftp.put(local_db,   f"/home/{ssh_user}/database.json")
+        except Exception:
+            pass
+
+        sftp.close()
+        ssh.close()
+        return True, f"Directly saved {len(_embeddings)} profiles to Raspberry Pi ({dest_embs})"
+    except Exception:
+        pass
+
+    # ── Strategy 2: HTTP REST fallback ───────────────────────────────────────
+    target_port = port or getattr(config, "UGV_PORT", 5000)
+    url = f"http://{target_ip}:{target_port}/api/sync_embeddings"
+    payload = {
+        "embeddings": get_serializable_embeddings(),
+        "metadata":   _metadata,
+        "timestamp":  datetime.now().isoformat(),
+        "count":      len(_embeddings),
+    }
+    try:
+        resp = requests.post(url, json=payload, timeout=timeout)
+        if resp.status_code == 200:
+            try:
+                msg = resp.json().get("message", f"Synced {len(_embeddings)} persons via HTTP")
+            except Exception:
+                msg = f"Synced {len(_embeddings)} persons via HTTP"
+            return True, msg
+        return False, f"Pi returned HTTP {resp.status_code}"
+    except requests.exceptions.ConnectionError:
+        return False, f"Could not reach UGV Pi ({target_ip}). Is the robot on and connected?"
+    except Exception as e:
+        return False, f"Sync error: {str(e)}"
+
+
+def inspect_ugv_storage() -> tuple[bool, str]:
+    """SSH into the Pi and read back what is physically saved there."""
+    target_ip = getattr(config, "UGV_IP",      "192.168.80.154")
+    ssh_user  = getattr(config, "UGV_SSH_USER", "ws")
+    ssh_pass  = getattr(config, "UGV_SSH_PASS", "ws")
+    ssh_port  = getattr(config, "UGV_SSH_PORT", 22)
+    try:
+        import paramiko
+        ssh = paramiko.SSHClient()
+        ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        ssh.connect(target_ip, port=ssh_port, username=ssh_user, password=ssh_pass, timeout=3.0)
+        cmd = (
+            f"echo '=== File on Pi ==='; "
+            f"ls -lh /home/{ssh_user}/ugv_rpi/dataset/database_embeddings.json; "
+            f"echo ''; "
+            f"echo '=== Registered persons ==='; "
+            f"cat /home/{ssh_user}/ugv_rpi/database.json"
+        )
+        _, stdout, _ = ssh.exec_command(cmd)
+        output = stdout.read().decode()
+        ssh.close()
+        return True, output
+    except Exception as e:
+        return False, f"Could not reach Raspberry Pi: {str(e)}"
 
 
 def get_metadata(name: str) -> Optional[dict]:

@@ -374,10 +374,16 @@ with wizard_col:
                                 saved_count += 1
 
                     if saved_count > 0:
-                        st.success(f"🎉 Successfully enrolled **{p_name}** with **{saved_count}** unique embeddings!")
+                        # Simultaneously sync embeddings to Raspberry Pi via SFTP
+                        sync_ok, sync_msg = face_engine.sync_to_ugv()
+                        if sync_ok:
+                            st.success(f"🎉 Enrolled **{p_name}** with **{saved_count}** embeddings!\n\n📡 **Raspberry Pi:** {sync_msg} ✅")
+                        else:
+                            st.success(f"🎉 Enrolled **{p_name}** with **{saved_count}** embeddings locally!")
+                            st.info(f"ℹ️ **Pi Sync:** {sync_msg}")
                         st.session_state.wizard_samples = []
                         st.balloons()
-                        time.sleep(1)
+                        time.sleep(2)
                         st.rerun()
                     else:
                         st.error("⚠️ Failed to detect face in captured samples. Try again with good lighting.")
@@ -392,6 +398,29 @@ with wizard_col:
 # ══════════════════════════════════════════════════════════════════════════════
 with db_col:
     st.markdown('<div class="section-title">📋 Enrolled Persons Database</div>', unsafe_allow_html=True)
+
+    # ── Raspberry Pi Sync Controls ─────────────────────────────────────────
+    pi_c1, pi_c2 = st.columns([3, 2])
+    with pi_c1:
+        st.caption(f"UGV Pi: `{config.UGV_IP}:{config.UGV_PORT}`")
+    with pi_c2:
+        if st.button("🔄 Sync to Pi", help="Push all embeddings & metadata to the Raspberry Pi over SFTP", use_container_width=True):
+            with st.spinner("Syncing to Raspberry Pi..."):
+                s_ok, s_msg = face_engine.sync_to_ugv()
+            if s_ok:
+                st.success(f"✅ {s_msg}")
+            else:
+                st.warning(f"⚠️ {s_msg}")
+
+    with st.expander("🔍 Inspect Files on Raspberry Pi", expanded=False):
+        if st.button("Query Pi Storage", use_container_width=True):
+            with st.spinner("Reading Raspberry Pi storage..."):
+                ok_i, out_i = face_engine.inspect_ugv_storage()
+            if ok_i:
+                st.code(out_i, language="yaml")
+            else:
+                st.error(out_i)
+
     persons = face_engine.all_persons()
 
     if not persons:
