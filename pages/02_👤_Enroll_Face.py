@@ -20,7 +20,7 @@ from PIL import Image
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import config
-from ugv import face_engine, camera
+from ugv import face_engine, camera, streamer
 
 st.set_page_config(page_title="Enroll Face Wizard | UGV Beast", layout="wide", page_icon="👤")
 
@@ -56,7 +56,8 @@ if "wizard_samples" not in st.session_state:
     st.session_state.wizard_samples = []  # list of BGR np.ndarray
 
 if "wizard_cam_on" not in st.session_state:
-    st.session_state.wizard_cam_on = False
+    st.session_state.wizard_cam_on = True  # Camera opens automatically on wizard load
+    camera.start(0)
 
 if "wizard_step" not in st.session_state:
     st.session_state.wizard_step = 0   # current guided angle (0–4)
@@ -211,9 +212,9 @@ with wizard_col:
         if not st.session_state.wizard_cam_on:
             if st.button("▶ Open Camera", use_container_width=True):
                 camera.stop()
-                time.sleep(0.15)
                 camera.start(0)  # Always use laptop webcam (index 0) for enrollment
                 st.session_state.wizard_cam_on = True
+                st.session_state["_cam_ver"] = st.session_state.get("_cam_ver", 0) + 1
                 st.rerun()
         else:
             if st.button("⏹ Stop Camera", use_container_width=True):
@@ -226,116 +227,47 @@ with wizard_col:
             st.session_state["_do_capture"] = True
 
     # Ensure laptop camera index 0 is active when wizard camera is on
-    if st.session_state.wizard_cam_on and getattr(camera, "_active_source", None) != 0:
+    if st.session_state.wizard_cam_on and (not camera.is_ready() or getattr(camera, "_active_source", None) != 0):
         camera.start(0)
 
-    # ── Live Camera Fragment with Pose-Guided Validation ─────────────────────
-    @st.fragment(run_every=0.1 if st.session_state.wizard_cam_on else None)
-    def enroll_cam_fragment():
-        if not st.session_state.wizard_cam_on:
-            return
+    # Sync active wizard angle step with the native streamer
+    step_idx = st.session_state.wizard_step % len(ANGLE_STEPS)
+    active_step = ANGLE_STEPS[step_idx]
+    streamer.set_enroll_step(active_step["key"], active_step["hint"])
 
-        if not camera.is_ready():
-            with st.spinner("⚡ Opening camera... please wait."):
-                camera.wait_until_ready(timeout=5.0)
-            st.rerun()
-            return
-
-        cur_frame = camera.get_frame()
-        if cur_frame is None:
-            st.info("⏳ Connecting to camera...")
-            return
-
-        h_f, w_f = cur_frame.shape[:2]
-        disp_frame = cur_frame.copy()
-
-        # ─ Detect face + landmarks ──────────────────────────────────────────
-        det = face_engine._get_detector(w_f, h_f)
-        has_face = False
-        pose_good = False
-        best_face = None
-
-        if det is not None:
-            try:
-                _, f_raw = det.detect(cur_frame)
-                if f_raw is not None and len(f_raw) > 0:
-                    has_face = True
-                    best_face = f_raw[0]   # largest / most confident face
-
-                    # ─ Pose analysis using landmarks ───────────────────────
-                    step_idx = st.session_state.wizard_step % len(ANGLE_STEPS)
-                    step_key = ANGLE_STEPS[step_idx]["key"]
-                    yaw, pitch = _analyse_pose(best_face, w_f, h_f)
-                    face_box = (int(best_face[0]), int(best_face[1]),
-                                int(best_face[2]), int(best_face[3]))
-                    pose_good = _pose_ok(step_key, yaw, pitch, face_box, w_f, h_f)
-
-                    # ─ Draw colored box: GREEN = correct, RED = wrong pose ─
-                    bx, by, bw, bh = face_box
-                    box_color = (0, 220, 80) if pose_good else (0, 60, 220)  # BGR
-
-                    cv2.rectangle(disp_frame,
-                                  (bx, by), (bx + bw, by + bh),
-                                  box_color, 2)
-
-                    label = "Good Pose!" if pose_good else ANGLE_STEPS[step_idx]["hint"][:32]
-                    (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.48, 1)
-                    cv2.rectangle(disp_frame,
-                                  (bx, by - th - 10), (bx + tw + 6, by),
-                                  box_color, -1)
-                    cv2.putText(disp_frame, label, (bx + 3, by - 5),
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.48, (255, 255, 255), 1)
-
-                    # Dynamic debug overlay tailored to the active step
-                    if step_key == "center":
-                        debug_txt = f"yaw={yaw:+.2f}  (need |yaw|<0.28)"
-                    elif step_key == "left":
-                        debug_txt = f"yaw={yaw:+.2f}  (need >+0.15)"
-                    elif step_key == "right":
-                        debug_txt = f"yaw={yaw:+.2f}  (need <-0.18)"
-                    elif step_key == "tilt_up":
-                        debug_txt = f"tilt={pitch:.3f}  (need <0.24)"
-                    else:
-                        debug_txt = f"yaw={yaw:+.2f}  tilt={pitch:.3f}"
-
-                    (dtw, dth), _ = cv2.getTextSize(debug_txt, cv2.FONT_HERSHEY_SIMPLEX, 0.50, 1)
-                    cv2.rectangle(disp_frame, (6, h_f - dth - 14), (6 + dtw + 14, h_f - 4), (20, 20, 20), -1)
-                    cv2.putText(disp_frame, debug_txt, (12, h_f - 9),
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.50, (0, 220, 255), 1)
-
-                    # Draw 5 landmarks as dots (indices 4-13)
-                    lm_pts = [
-                        (int(best_face[4]),  int(best_face[5])),   # right eye
-                        (int(best_face[6]),  int(best_face[7])),   # left eye
-                        (int(best_face[8]),  int(best_face[9])),   # nose tip
-                        (int(best_face[10]), int(best_face[11])),  # right mouth
-                        (int(best_face[12]), int(best_face[13])),  # left mouth
-                    ]
-                    for pt in lm_pts:
-                        cv2.circle(disp_frame, pt, 4, box_color, -1)
-
-            except Exception:
-                pass
-
-        rgb_disp = cv2.cvtColor(disp_frame, cv2.COLOR_BGR2RGB)
-        st.image(rgb_disp, channels="RGB", use_container_width=True)
+    # ── Live Camera Feed (Native 30 FPS Stream) ──────────────────────────────
+    if not st.session_state.wizard_cam_on:
+        st.markdown("""
+        <div style="background:#0f172a; border:2px dashed #334155; border-radius:12px;
+                    padding:50px 20px; text-align:center; color:#94a3b8; margin-bottom:12px;">
+            <span style="font-size:2.2rem; display:block; margin-bottom:10px;">📷</span>
+            <strong style="color:#f1f5f9; font-size:1.05rem;">Camera is stopped</strong>
+            <p style="font-size:0.85rem; margin-top:6px; color:#64748b;">Click <b>▶ Open Camera</b> above to resume live feed</p>
+        </div>
+        """, unsafe_allow_html=True)
+    else:
+        # Native browser MJPEG stream: hardware-accelerated 30 FPS with cache-busting version
+        cam_ver = st.session_state.get("_cam_ver", 0)
+        st.markdown(f"""
+        <div style="border-radius:12px; overflow:hidden; border:1px solid #1e3a5f;
+                    box-shadow:0 8px 30px rgba(0,0,0,0.5); background:#0f172a; margin-bottom:12px;">
+            <img src="http://localhost:8502/enroll_feed?v={cam_ver}" style="width:100%; height:auto; display:block;" />
+        </div>
+        """, unsafe_allow_html=True)
 
         # ─ Handle Capture click ──────────────────────────────────────────
         if st.session_state.pop("_do_capture", False):
-            if not has_face:
+            e_state = streamer.get_enroll_state()
+            if not e_state["has_face"]:
                 st.warning("⚠️ No face detected. Look directly at the camera.")
-            elif not pose_good:
-                step_idx = st.session_state.wizard_step % len(ANGLE_STEPS)
-                st.warning(f"❌ Pose not right for '{ANGLE_STEPS[step_idx]['label']}'. "
-                           f"Hint: {ANGLE_STEPS[step_idx]['hint']}")
-            else:
-                st.session_state.wizard_samples.append(cur_frame.copy())
+            elif not e_state["pose_good"]:
+                st.warning(f"❌ Pose not right for '{active_step['label']}'. Hint: {active_step['hint']}")
+            elif e_state["cur_frame"] is not None:
+                st.session_state.wizard_samples.append(e_state["cur_frame"])
                 st.session_state.wizard_step += 1
                 n = len(st.session_state.wizard_samples)
                 st.toast(f"✅ Angle {n} captured!")
                 st.rerun()
-
-    enroll_cam_fragment()
 
 
 

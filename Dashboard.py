@@ -18,7 +18,7 @@ st.set_page_config(
 )
 
 import config
-from ugv import face_engine, telemetry, camera
+from ugv import face_engine, telemetry, camera, streamer
 
 # ── Global CSS / theme ────────────────────────────────────────────────────────
 st.markdown("""

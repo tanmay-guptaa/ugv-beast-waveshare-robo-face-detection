@@ -94,6 +94,42 @@ def _get_recognizer():
             _recognizer = None
     return _recognizer
 
+
+def fast_detect_faces(frame: np.ndarray, det_w: int = 320, det_h: int = 240) -> Optional[np.ndarray]:
+    """
+    Run fast YuNet detection on a downscaled frame and return faces scaled
+    back to original frame coordinates. Cuts inference time to ~9ms.
+    """
+    if frame is None or frame.size == 0:
+        return None
+    h_orig, w_orig = frame.shape[:2]
+    small = cv2.resize(frame, (det_w, det_h))
+    with _detect_lock:
+        det = _get_detector(det_w, det_h)
+        if det is None:
+            return None
+        try:
+            _, faces = det.detect(small)
+        except Exception:
+            return None
+
+    if faces is None or len(faces) == 0:
+        return None
+
+    sx = w_orig / float(det_w)
+    sy = h_orig / float(det_h)
+    scaled_faces = faces.copy()
+    for f in scaled_faces:
+        f[0] *= sx
+        f[1] *= sy
+        f[2] *= sx
+        f[3] *= sy
+        # Scale 5 landmarks (indices 4..13)
+        for i in range(4, 14, 2):
+            f[i]   *= sx
+            f[i+1] *= sy
+    return scaled_faces
+
 # ── In-memory DB ──────────────────────────────────────────────────────────────
 _embeddings: dict[str, list] = {}   # name → [128-D np.array, ...]
 _metadata:   list[dict]      = []   # list of person records
@@ -337,6 +373,19 @@ def inspect_ugv_storage() -> tuple[bool, str]:
 _last_greeted: dict[str, float] = {}
 _GREET_COOLDOWN_SEC = 25.0   # seconds between greetings for the same person
 
+def _is_ssh_reachable(target_ip: str, port: int = 22, timeout: float = 0.3) -> bool:
+    """Quick socket check before attempting SSH connection."""
+    try:
+        import socket
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.settimeout(timeout)
+        res = s.connect_ex((target_ip, port))
+        s.close()
+        return res == 0
+    except Exception:
+        return False
+
+
 def _generate_piper_wav_on_pi(target_ip: str, name: str, wav_filename: str) -> bool:
     """Generate greeting WAV file on Raspberry Pi using Piper neural TTS."""
     ssh_user = getattr(config, "UGV_SSH_USER", "ws")
@@ -345,11 +394,14 @@ def _generate_piper_wav_on_pi(target_ip: str, name: str, wav_filename: str) -> b
     first_name = name.strip().split()[0] if name.strip() else name
     greeting = f"Hello {first_name}"
 
+    if not _is_ssh_reachable(target_ip, ssh_port):
+        return False
+
     try:
         import paramiko
         ssh = paramiko.SSHClient()
         ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-        ssh.connect(target_ip, port=ssh_port, username=ssh_user, password=ssh_pass, timeout=3.0)
+        ssh.connect(target_ip, port=ssh_port, username=ssh_user, password=ssh_pass, timeout=1.0)
 
         remote_wav = f"/home/{ssh_user}/ugv_rpi/sounds/greetings/{wav_filename}"
         piper_bin = f"/home/{ssh_user}/ugv_rpi/piper/piper/piper"
@@ -391,11 +443,22 @@ def _run_tts_on_pi(name: str) -> None:
     greeting = f"Hello {first_name}"
     remote_wav = f"/home/{ssh_user}/ugv_rpi/sounds/greetings/{wav_filename}"
 
+    if not _is_ssh_reachable(target_ip, ssh_port):
+        # Fallback to UDP 5055 immediately without waiting on SSH
+        try:
+            import socket
+            sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            sock.sendto(greeting.encode("utf-8"), (target_ip, 5055))
+            sock.close()
+        except Exception:
+            pass
+        return
+
     try:
         import paramiko
         ssh = paramiko.SSHClient()
         ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-        ssh.connect(target_ip, port=ssh_port, username=ssh_user, password=ssh_pass, timeout=3.0)
+        ssh.connect(target_ip, port=ssh_port, username=ssh_user, password=ssh_pass, timeout=1.0)
 
         # Check shared cooldown with the Raspberry Pi onboard service to prevent double-speaking
         cmd = f"python3 -c \\\"import json, os, time; f='/home/{ssh_user}/ugv_rpi/.last_greeted'; d = json.load(open(f)) if os.path.exists(f) else {{}}; print(time.time() - float(d.get('{name}', 0)))\\\""

@@ -20,7 +20,7 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import config
-from ugv import camera, face_engine, esp32_comm
+from ugv import camera, face_engine, esp32_comm, streamer
 
 st.set_page_config(page_title="Live Detection | UGV Beast", layout="wide", page_icon="📷")
 
@@ -79,7 +79,6 @@ st.sidebar.markdown('<div class="section-title">⚙️ Camera & Tracking</div>',
 
 # Camera source switcher
 cam_options = ["🤖 UGV Beast Camera", "💻 Laptop Webcam"]
-# Default to UGV Beast Camera when robot is configured
 default_idx = 0 if not isinstance(config.CAMERA_SOURCE, int) else 1
 cam_source_choice = st.sidebar.radio("Camera Source", options=cam_options, index=default_idx)
 
@@ -99,6 +98,9 @@ if st.session_state.active_cam_source != current_target_source:
 
 run_detection = st.sidebar.checkbox("👁 Run Face Recognition", value=True)
 auto_track = st.sidebar.checkbox("🎯 Auto Pan/Tilt Tracking", value=True)
+
+# Sync settings with native background streamer
+streamer.set_live_options(run_detection=run_detection, auto_track=auto_track)
 
 # ── Session state init ────────────────────────────────────────────────────────
 if "cam_started" not in st.session_state:
@@ -131,114 +133,75 @@ with col_actions:
             st.rerun()
 
 
-# ── Live Stream Fragment (No-flicker in-place updates) ─────────────────────────
-@st.fragment(run_every=0.1)
-def live_stream_fragment():
-    if not st.session_state.cam_started:
-        st.markdown("""
-        <div class="cam-idle-box">
-            <span style="font-size: 2.5rem; margin-bottom: 12px;">📷</span>
-            <strong style="color: #f1f5f9;">Camera is stopped</strong>
-            <span style="font-size: 0.9rem; color: #64748b; margin-top: 6px;">Click <b>▶ Start</b> above to resume live feed</span>
-        </div>
-        """, unsafe_allow_html=True)
-        return
-
-    frame = camera.get_frame()
-    if frame is None:
-        st.markdown("""
-        <div class="cam-idle-box">
-            <span style="font-size: 2.5rem; margin-bottom: 12px;">⏳</span>
-            <strong style="color: #f1f5f9;">Connecting to camera index {}...</strong>
-            <span style="font-size: 0.85rem; color: #64748b; margin-top: 6px;">Ensure webcam or UGV camera is connected</span>
-        </div>
-        """.format(st.session_state.get("active_cam_source", "Live")), unsafe_allow_html=True)
-        return
-
-    # Run detection
-    if run_detection:
-        try:
-            annotated, det_info = face_engine.detect_and_annotate(frame)
-        except Exception:
-            annotated = frame.copy()
-            det_info = face_engine.get_last_detection()
-    else:
-        annotated = frame.copy()
-        det_info  = face_engine.get_last_detection()
-
-    is_known = det_info.get("is_known", False)
-    name     = det_info.get("name", "No Face")
-    conf     = det_info.get("confidence", 0.0)
-
-    # 🔊 Voice greeting: say "Hello [Name]" on UGV Beast speaker when recognised
-    # Temporal filter: require 2 consecutive frames of the same confirmed person
-    # to completely eliminate single-frame glitches and guarantee strangers are never greeted.
-    if is_known and name not in ("No Face", "Unknown", "Stranger", ""):
-        if st.session_state.get("_detected_streak_person") == name:
-            st.session_state["_detected_streak_count"] = st.session_state.get("_detected_streak_count", 0) + 1
-        else:
-            st.session_state["_detected_streak_person"] = name
-            st.session_state["_detected_streak_count"] = 1
-
-        if st.session_state["_detected_streak_count"] >= 2:
-            face_engine.speak_on_ugv(name)
-    else:
-        st.session_state["_detected_streak_count"] = 0
-        st.session_state["_detected_streak_person"] = None
-
-    # Robot pan/tilt auto-tracking
-    if auto_track and det_info.get("box") is not None and not config.DEMO_MODE:
-        top, right, bottom, left = det_info["box"]
-        face_cx = (left + right) // 2
-        face_cy = (top + bottom) // 2
-        frame_cx = frame.shape[1] // 2
-        frame_cy = frame.shape[0] // 2
-        err_x = face_cx - frame_cx
-        err_y = face_cy - frame_cy
-        pan_adj  = int(config.PAN_CENTER  - err_x * 0.05)
-        tilt_adj = int(config.TILT_CENTER + err_y * 0.05)
-        esp32_comm.set_pan(pan_adj)
-        esp32_comm.set_tilt(tilt_adj)
-
-    # Render video + metrics
+# ── Live View (Native 30 FPS Browser Stream + Asynchronous Metrics) ────────────
+if not st.session_state.cam_started:
+    st.markdown("""
+    <div class="cam-idle-box">
+        <span style="font-size: 2.5rem; margin-bottom: 12px;">📷</span>
+        <strong style="color: #f1f5f9;">Camera is stopped</strong>
+        <span style="font-size: 0.9rem; color: #64748b; margin-top: 6px;">Click <b>▶ Start</b> above to resume live feed</span>
+    </div>
+    """, unsafe_allow_html=True)
+else:
     vid_col, info_col = st.columns([3, 1])
 
     with vid_col:
-        # Status banner above video
-        if name not in ("No Face", "Unknown", ""):
-            if is_known:
-                st.markdown(f"""
-                <div class="detect-banner-known">
-                    <span style="font-size:1.1rem; font-weight:800; color:#4ade80;">✅ Authorized: {name}</span>
-                    <span style="font-size:0.85rem; color:#a7f3d0; margin-left:14px;">Match: {conf:.1f}%</span>
-                </div>""", unsafe_allow_html=True)
-            else:
-                st.markdown("""
-                <div class="detect-banner-stranger">
-                    <span style="font-size:1.1rem; font-weight:800; color:#fca5a5;">⚠️ Unknown Person Detected</span>
-                    <span style="font-size:0.85rem; color:#fecaca; margin-left:14px;">Not in database</span>
-                </div>""", unsafe_allow_html=True)
-        elif name == "Unknown":
-            st.markdown("""
-            <div class="detect-banner-neutral">
-                <span style="font-size:0.95rem; font-weight:700; color:#38bdf8;">👤 Face Detected</span>
-                <span style="font-size:0.8rem; color:#94a3b8; margin-left:10px;">Scanning features...</span>
-            </div>""", unsafe_allow_html=True)
-
-        rgb_frame = cv2.cvtColor(annotated, cv2.COLOR_BGR2RGB)
-        st.image(rgb_frame, channels="RGB", use_container_width=True)
+        # Native browser MJPEG stream: hardware-accelerated 30 FPS without DOM rebuilding
+        st.markdown("""
+        <div style="border-radius:12px; overflow:hidden; border:1px solid #1e3a5f; box-shadow:0 8px 30px rgba(0,0,0,0.5); background:#0f172a;">
+            <img src="http://localhost:8502/live_feed" style="width:100%; height:auto; display:block;" />
+        </div>
+        """, unsafe_allow_html=True)
 
     with info_col:
-        st.markdown('<div class="section-title">🎯 Detection Info</div>', unsafe_allow_html=True)
-        st.metric("👤 Detected", name)
-        st.metric("🎖 Role", det_info.get("role", "—"))
-        st.metric("🔐 Access", det_info.get("access_level", "—"))
-        st.metric("📊 Match", f"{conf:.1f}%")
+        @st.fragment(run_every=0.4)
+        def live_info_fragment():
+            det_info = face_engine.get_last_detection()
+            is_known = det_info.get("is_known", False)
+            name     = det_info.get("name", "No Face")
+            conf     = det_info.get("confidence", 0.0)
 
-        st.markdown("---")
-        st.markdown('<div class="section-title">📊 Live Metrics</div>', unsafe_allow_html=True)
-        st.metric("🎞 FPS", f"{camera.get_fps():.0f}")
+            # 🔊 Voice greeting: say "Hello [Name]" on UGV Beast speaker when recognised
+            if is_known and name not in ("No Face", "Unknown", "Stranger", ""):
+                if st.session_state.get("_detected_streak_person") == name:
+                    st.session_state["_detected_streak_count"] = st.session_state.get("_detected_streak_count", 0) + 1
+                else:
+                    st.session_state["_detected_streak_person"] = name
+                    st.session_state["_detected_streak_count"] = 1
 
+                if st.session_state["_detected_streak_count"] >= 2:
+                    face_engine.speak_on_ugv(name)
+            else:
+                st.session_state["_detected_streak_count"] = 0
+                st.session_state["_detected_streak_person"] = None
 
-# Run the live stream fragment
-live_stream_fragment()
+            # Status banner
+            if name not in ("No Face", "Unknown", ""):
+                if is_known:
+                    st.markdown(f"""
+                    <div class="detect-banner-known" style="padding:8px 12px; margin-bottom:8px;">
+                        <span style="font-size:1.0rem; font-weight:800; color:#4ade80;">✅ {name}</span>
+                        <span style="font-size:0.8rem; color:#a7f3d0; margin-left:10px;">{conf:.1f}%</span>
+                    </div>""", unsafe_allow_html=True)
+                else:
+                    st.markdown("""
+                    <div class="detect-banner-stranger" style="padding:8px 12px; margin-bottom:8px;">
+                        <span style="font-size:1.0rem; font-weight:800; color:#fca5a5;">⚠️ Stranger</span>
+                    </div>""", unsafe_allow_html=True)
+            elif name == "Unknown":
+                st.markdown("""
+                <div class="detect-banner-neutral" style="padding:8px 12px; margin-bottom:8px;">
+                    <span style="font-size:0.9rem; font-weight:700; color:#38bdf8;">👤 Scanning...</span>
+                </div>""", unsafe_allow_html=True)
+
+            st.markdown('<div class="section-title">🎯 Detection Info</div>', unsafe_allow_html=True)
+            st.metric("👤 Detected", name)
+            st.metric("🎖 Role", det_info.get("role", "—"))
+            st.metric("🔐 Access", det_info.get("access_level", "—"))
+            st.metric("📊 Match", f"{conf:.1f}%")
+
+            st.markdown("---")
+            st.markdown('<div class="section-title">📊 Live Metrics</div>', unsafe_allow_html=True)
+            st.metric("🎞 FPS", f"{camera.get_fps():.0f}")
+
+        live_info_fragment()

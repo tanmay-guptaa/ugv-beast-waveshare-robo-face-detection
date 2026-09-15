@@ -38,21 +38,75 @@ _frame_count  = 0
 _ready_event  = threading.Event()   # set once first frame arrives
 
 
+def _http_mjpeg_loop(url: str):
+    global _latest_frame, _camera_running, _fps, _frame_count
+    import requests
+
+    while _camera_running:
+        try:
+            resp = requests.get(url, stream=True, timeout=3.0)
+            if resp.status_code != 200:
+                time.sleep(0.5)
+                continue
+
+            bytes_buffer = b""
+            t0 = time.time()
+            local_count = 0
+
+            for chunk in resp.iter_content(chunk_size=4096):
+                if not _camera_running:
+                    break
+                bytes_buffer += chunk
+
+                b = bytes_buffer.rfind(b'\xff\xd9')
+                if b != -1:
+                    a = bytes_buffer.rfind(b'\xff\xd8', 0, b)
+                    if a != -1:
+                        jpg_bytes = bytes_buffer[a:b+2]
+                        bytes_buffer = bytes_buffer[b+2:]
+                        frame = cv2.imdecode(np.frombuffer(jpg_bytes, dtype=np.uint8), cv2.IMREAD_COLOR)
+                        if frame is not None:
+                            with _frame_lock:
+                                _latest_frame = frame
+
+                            local_count += 1
+                            _frame_count = local_count
+                            elapsed = time.time() - t0
+                            if elapsed > 0:
+                                _fps = round(local_count / elapsed, 1)
+
+                            if not _ready_event.is_set():
+                                _ready_event.set()
+        except Exception:
+            time.sleep(0.5)
+
+    _ready_event.clear()
+
+
 def _capture_loop(source=None):
     global _latest_frame, _camera_running, _fps, _frame_count
 
     if source is None:
         source = getattr(config, "CAMERA_SOURCE", 0)
 
-    # Use DirectShow on Windows ONLY for local hardware webcams (numeric index).
-    # For HTTP/RTSP URLs (e.g. UGV Beast video_feed), use default FFMPEG backend.
+    # Route HTTP/HTTPS streams to zero-latency stream reader
+    if isinstance(source, str) and (source.startswith("http://") or source.startswith("https://")):
+        _http_mjpeg_loop(source)
+        return
+
+    # Use DirectShow on Windows with MJPG hardware compression for 30 FPS USB capture
     if isinstance(source, int):
         backend = cv2.CAP_DSHOW if sys.platform == "win32" else cv2.CAP_ANY
         cap = cv2.VideoCapture(source, backend)
+        if sys.platform == "win32":
+            cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'MJPG'))
     else:
         cap = cv2.VideoCapture(str(source))
 
     # Resolution & frame rate
+    if not cap.isOpened() and isinstance(source, int):
+        cap = cv2.VideoCapture(source, cv2.CAP_ANY)
+
     cap.set(cv2.CAP_PROP_FRAME_WIDTH,  640)
     cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
     cap.set(cv2.CAP_PROP_FPS, 30)
@@ -66,11 +120,11 @@ def _capture_loop(source=None):
     while _camera_running:
         ret, frame = cap.read()
         if not ret:
-            time.sleep(0.02)
+            time.sleep(0.01)
             continue
 
         with _frame_lock:
-            _latest_frame = frame.copy()
+            _latest_frame = frame
 
         local_count += 1
         _frame_count = local_count
@@ -99,10 +153,9 @@ def start(source=None):
     if _camera_running and _active_source == source:
         return
 
-    # If running with a different source, stop the current camera first
+    # If running with a different source, cleanly stop the current camera first
     if _camera_running:
         stop()
-        time.sleep(0.2)
 
     _active_source = source
     _ready_event.clear()
@@ -111,12 +164,15 @@ def start(source=None):
     _camera_thread.start()
 
 
-def stop():
-    """Stop the capture thread and release the camera."""
-    global _camera_running, _latest_frame, _active_source
+def stop(timeout: float = 2.0):
+    """Stop the capture thread and wait until hardware camera is completely released."""
+    global _camera_running, _latest_frame, _active_source, _camera_thread
     _camera_running = False
     _active_source = None
     _ready_event.clear()
+    if _camera_thread is not None and _camera_thread.is_alive():
+        _camera_thread.join(timeout=timeout)
+    _camera_thread = None
     with _frame_lock:
         _latest_frame = None
 
